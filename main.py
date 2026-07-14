@@ -44,8 +44,8 @@ def flight_agent(state:TravelState):
 
     flight_data = flight_search(query=query)
 
-    print("="*50,"Flight flight_agent")
-    print(flight_data)
+    # print("="*50,"Flight flight_agent")
+    # print(flight_data)
     # print("Flight Agent:", time.time() - start)
     return {
         "flight_results" : flight_data,
@@ -64,8 +64,8 @@ def hotel_agent(state:TravelState):
 
     hotel_results = tavily_search(query=query)
 
-    print("="*50,"Hotel hotel_agent")
-    print(hotel_results)
+    # print("="*50,"Hotel hotel_agent")
+    # print(hotel_results)
 
     return {
         "hotel_results" : hotel_results,
