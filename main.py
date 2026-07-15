@@ -1,6 +1,8 @@
+import asyncio
 import operator
 import os 
 from typing import TypedDict,Annotated
+import uuid
 
 import psycopg
 from langgraph.graph import StateGraph,START,END
@@ -14,8 +16,18 @@ from langchain_core.messages import (
 
 from langchain_groq import ChatGroq
 
-from tools.tavily_tool import tavily_search
-from tools.flight_tool import flight_search
+# from mcp_client import tavily_mcp_search
+
+# from tools.flight_tool import flight_search
+from mcp_client import (
+    extract_destination,
+    forecast_mcp_search,
+    tavily_mcp_search,
+    get_airlines,
+    get_airports,
+    avition_mcp_call,
+    weather_mcp_search
+)
 import time
 from dotenv import load_dotenv
 
@@ -25,7 +37,8 @@ DATABASE_URL=os.getenv("DATABASE_URL")
 
 
 llm = ChatGroq(
-    model = "llama-3.3-70b-versatile"
+    model = "llama-3.3-70b-versatile",
+    api_key=os.getenv("GROQ_API_KEY")
 )
 
 class TravelState(TypedDict):
@@ -35,111 +48,202 @@ class TravelState(TypedDict):
     hotel_results :str
     itinerary :str
     llm_calls : int
+    weather_results : str
 
+
+# def flight_agent(state:TravelState):
+#     print("Running flight_agent")
+#     start = time.time()
+#     query = state["user_query"]
+
+#     flight_data = flight_search(query=query)
+
+#     # print("="*50,"Flight flight_agent")
+#     # print(flight_data)
+#     # print("Flight Agent:", time.time() - start)
+#     return {
+#         "flight_results" : flight_data,
+#         "messages" :[
+#             AIMessage(content=f"Flight results fetched")
+
+#         ],
+#         # "llm_calls" : state.get("llm_calls" , 0) +1
+#     }
+
+
+
+# Flight Tool Router Prompt
+FLIGHT_AGENT_PROMPT = """
+You are a travel flight expert.
+
+User Query:
+{query}
+
+Airport Information:
+{airport_data}
+
+Airline Information:
+{airline_data}
+
+Generate:
+
+1. Likely departure airport
+2. Likely arrival airport
+3. Airlines serving this route
+4. Typical flight duration
+5. Estimated airfare range
+6. Peak season pricing warning
+7. Booking advice
+
+Return concise travel guidance. 
+"""
 
 def flight_agent(state:TravelState):
-    print("Running flight_agent")
-    start = time.time()
+    print("\nINSIDE FLIGHT AGENT\n")
+
     query = state["user_query"]
 
-    flight_data = flight_search(query=query)
+    try: 
+        airports = asyncio.run(
+            avition_mcp_call(
+                "list_airports"
+            )
+        )
 
-    # print("="*50,"Flight flight_agent")
-    # print(flight_data)
-    # print("Flight Agent:", time.time() - start)
+        airlines = asyncio.run(
+            avition_mcp_call(
+                "list_airlines"
+            )
+        ) 
+
+        prompt = FLIGHT_AGENT_PROMPT.format(
+            query=query,
+            airport_data=str(airports)[:3000],
+            airline_data=str(airlines)[:3000]
+        )
+
+        response = llm.invoke([
+            SystemMessage(
+                content="You are an expert travel flight planner."
+            ),
+            HumanMessage(content=prompt)
+        ])
+
+        flight_data = response.content
+
+    except Exception as e:
+
+        flight_data = f"Flight information unavailable: {str(e)}"
+
     return {
-        "flight_results" : flight_data,
-        "messages" :[
-            AIMessage(content=f"Flight results fetched")
-
+        "flight_results": flight_data,
+        "messages": [
+            AIMessage(
+                content="Flight recommendations generated"
+            )
         ],
-        # "llm_calls" : state.get("llm_calls" , 0) +1
+        # "llm_calls": int(state.get("llm_calls", 0)) + 1
+
     }
 
 
-def hotel_agent(state:TravelState):
-    print("Running hotel_agent")
+# def hotel_agent(state:TravelState):
+#     print("Running hotel_agent")
 
+#     query = f"Best hotels for {state['user_query']}"
+
+#     # hotel_results = tavily_search(query=query)
+
+#     hotel_results = asyncio.run(tavily_mcp_search(query=query))
+
+#     # print("="*50,"Hotel hotel_agent")
+#     # print(hotel_results)
+
+#     return {
+#         "hotel_results" : hotel_results,
+#         "messages" :[
+#             AIMessage(content=f"Hotel results fetched")
+
+#         ],
+#         # "llm_calls" : state.get("llm_calls" , 0) +1
+#     }
+
+def hotel_agent(state: TravelState):
     query = f"Best hotels for {state['user_query']}"
+    #hotel_results = tavily_search(query)
 
-    hotel_results = tavily_search(query=query)
-
-    # print("="*50,"Hotel hotel_agent")
-    # print(hotel_results)
+    hotel_results = asyncio.run(
+        tavily_mcp_search(query)
+    )
 
     return {
-        "hotel_results" : hotel_results,
-        "messages" :[
-            AIMessage(content=f"Hotel results fetched")
-
+        "hotel_results": hotel_results,
+        "messages": [
+            AIMessage(content="Hotel information fetched")
         ],
-        # "llm_calls" : state.get("llm_calls" , 0) +1
+        # "llm_calls": int(state.get("llm_calls", 0)) + 1
     }
 
 
-def itienrary_agent(state : TravelState):
-    print("Running itienrary_agent")
-    prompt =f"""
-    Create a travel itinerary.
+def weather_agent(state: TravelState):
 
+    city = extract_destination(state["user_query"])
+
+    weather_data = asyncio.run(
+        weather_mcp_search(city)
+    )
+
+    forecast_data = asyncio.run(
+        forecast_mcp_search(city)
+    )
+
+    return {
+        "weather_results": f"""
+        Current Weather:
+        {weather_data}
+
+        Forecast:
+        {forecast_data}
+        """,
+        "messages": [
+            AIMessage(
+                content="Weather information fetched"
+            )
+        ]
+    }
+
+    
+
+def itinerary_agent(state: TravelState):
+
+    prompt = f"""
+    Create a travel itinerary.
     User Query:
     {state['user_query']}
 
-    Flight Results :
+    Flight Results:
     {state['flight_results']}
 
-    Hotel Results :
+    Hotel Results:
     {state['hotel_results']}
 
+    Weather Information:
+    {state['weather_results']}
     """
 
-    # print("itienrary Agent ", {prompt})
-    
     response = llm.invoke([
         SystemMessage(
             content="You are an expert travel planner"
         ),
-        HumanMessage(
-            content=prompt
-        )
+        HumanMessage(content=prompt)
     ])
 
-    print("itienrary Agent Resonse ", response)
-    
     return {
-        "itinerary" : response.content,
-        "messages" :[response],
-        # "llm_calls" :state.get("llm_calls",0)+1
-
+        "itinerary": response.content,
+        "messages": [response],
+        # "llm_calls": int(state.get("llm_calls", 0)) + 1
     }
 
-
-
-def final_agent(state : TravelState):
-    print("Running final_agent")
-    final_prompt =f"""
-    Generate final travel response.
-
-    Flights:
-    {state["flight_results"]}
-
-    Hotels:
-    {state["hotel_results"]}
-
-    Itienrary:
-    {state["itinerary"]}
-    """
-
-    print("Final Agent Prompt" , final_prompt)
-    response = llm.invoke([
-        HumanMessage(content=final_prompt)
-    ])
-
-    print("Final Agent Response" , response)
-    return {
-        "messages":[response],
-        # "llm_calls" :state.get("llm_calls",0)+1
-    }
 
 
 
@@ -148,15 +252,16 @@ graph = StateGraph(TravelState)
 
 graph.add_node("flight_agent",flight_agent)
 graph.add_node("hotel_agent",hotel_agent)
-graph.add_node("itienrary_agent",itienrary_agent)
-graph.add_node("final_agent",final_agent)
+graph.add_node("weather_agent",weather_agent)
+graph.add_node("itinerary_agent",itinerary_agent)
+
 
 
 graph.add_edge(START,"flight_agent")
 graph.add_edge("flight_agent","hotel_agent")
-graph.add_edge("hotel_agent","itienrary_agent")
-graph.add_edge("itienrary_agent","final_agent")
-graph.add_edge("final_agent",END)
+graph.add_edge("hotel_agent","weather_agent")
+graph.add_edge("weather_agent","itinerary_agent")
+graph.add_edge("itinerary_agent",END)
 
 _conn= psycopg.connect(DATABASE_URL, autocommit=True)
 checkpointer=PostgresSaver(_conn)
@@ -167,9 +272,15 @@ app = graph.compile(checkpointer=checkpointer)
 
 
 if __name__ == "__main__":
-    config ={"configurable" :{
-            "thread_id" : "shivam_tiwari"
-    }}
+    # config ={"configurable" :{
+    #         "thread_id" : "shivam_tiwari"
+    # }}
+
+    config ={
+        "configurable" :{
+            "thread_id" : str(uuid.uuid4())
+        } 
+    }
 
     user_input=input("Enter travel request :")
 
